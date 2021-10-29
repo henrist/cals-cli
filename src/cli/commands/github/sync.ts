@@ -6,11 +6,16 @@ import path from "path"
 import read from "read"
 import { CommandModule } from "yargs"
 import { Config } from "../../../config"
-import { DefinitionFile, getRepos } from "../../../definition/definition"
+import {
+  DefinitionFile,
+  getRepoId,
+  getRepos,
+} from "../../../definition/definition"
 import {
   Definition,
   DefinitionRepo,
   GetReposResponse,
+  Project,
 } from "../../../definition/types"
 import { CloneType, GitRepo, UpdateResult } from "../../../git/GitRepo"
 import { getCompareLink } from "../../../git/util"
@@ -48,8 +53,11 @@ interface RepoWithUpdateResult extends ActualRepo {
  * The contents here will be different on Windows due to
  * backward slashes in paths.
  */
-function getRelpath(it: { group: string; name: string }): string {
-  return path.join(it.group, it.name)
+function getRelpath(
+  isGroupedByProject: boolean,
+  it: { group: string; name: string },
+): string {
+  return isGroupedByProject ? path.join(it.group, it.name) : it.name
 }
 
 async function appendFile(path: string, data: string): Promise<void> {
@@ -69,7 +77,7 @@ async function appendFile(path: string, data: string): Promise<void> {
 interface CalsManifest {
   version: 2 // Bump this on breaking changes to manifest/command.
   githubOrganization: string
-  resourcesDefinition: {
+  resourcesDefinition?: {
     path: string
     /**
      * If tags are specified, there must be overlap between these tags
@@ -77,6 +85,15 @@ interface CalsManifest {
      */
     tags?: string[]
   }
+  /**
+   * How the repositories will be organized on disk.
+   *
+   * group-by-project: Keep every repo inside a directory named after the project
+   * flat: Keep all repos in the same directory
+   *
+   * @default group-by-project
+   */
+  pathStyle?: "group-by-project" | "flat"
 }
 
 export function getAliases(repo: DefinitionRepo): Alias[] {
@@ -181,9 +198,9 @@ async function updateRepos(reporter: Reporter, foundRepos: ActualRepo[]) {
 
 function guessDefinitionRepoName(
   rootdir: string,
-  cals: CalsManifest,
+  resourcesDefinition: NonNullable<CalsManifest["resourcesDefinition"]>,
 ): string | null {
-  const p = path.resolve(rootdir, cals.resourcesDefinition.path)
+  const p = path.resolve(rootdir, resourcesDefinition.path)
 
   const relativePath = path.relative(rootdir, p)
   if (relativePath.slice(0, 1) == ".") {
@@ -202,9 +219,9 @@ function guessDefinitionRepoName(
 
 async function getDefinition(
   rootdir: string,
-  cals: CalsManifest,
+  resourcesDefinition: NonNullable<CalsManifest["resourcesDefinition"]>,
 ): Promise<Definition> {
-  const p = path.resolve(rootdir, cals.resourcesDefinition.path)
+  const p = path.resolve(rootdir, resourcesDefinition.path)
   if (!fs.existsSync(p)) {
     throw Error(`The file ${p} does not exist`)
   }
@@ -226,22 +243,67 @@ function getDirNames(parent: string): string[] {
   )
 }
 
-async function getReposInOrg(
+async function getReposInOrgFromResourcesDefinition(
   cals: CalsManifest,
+  resourcesDefinition: NonNullable<CalsManifest["resourcesDefinition"]>,
   rootdir: string,
 ): Promise<GetReposResponse[]> {
-  const definition = await getDefinition(rootdir, cals)
+  const definition = await getDefinition(rootdir, resourcesDefinition)
   return getRepos(definition)
     .filter((it) => it.orgName === cals.githubOrganization)
     .filter(
       (it) =>
-        cals.resourcesDefinition.tags === undefined ||
+        resourcesDefinition.tags === undefined ||
         (it.project.tags || []).some((tag) =>
-          cals.resourcesDefinition.tags?.includes(tag),
+          resourcesDefinition.tags?.includes(tag),
         ) ||
         // Always include if already checked out to avoid stale state.
         fs.existsSync(path.join(rootdir, it.project.name, it.repo.name)),
     )
+}
+
+async function getReposInOrgFromApi(
+  github: GitHubService,
+  orgName: string,
+): Promise<GetReposResponse[]> {
+  const result = await github.getOrgRepoList({ org: orgName })
+
+  const project: Project = {
+    github: [
+      {
+        organization: orgName,
+        repos: [],
+        teams: [],
+      },
+    ],
+    name: "global",
+  }
+
+  return result.map((repo) => ({
+    id: getRepoId(repo.owner.login, repo.name),
+    orgName,
+    project,
+    repo: {
+      name: repo.name,
+      archived: repo.isArchived,
+    },
+  }))
+}
+
+async function getReposInOrg(
+  github: GitHubService,
+  cals: CalsManifest,
+  rootdir: string,
+): Promise<GetReposResponse[]> {
+  if (cals.resourcesDefinition != null) {
+    return getReposInOrgFromResourcesDefinition(
+      cals,
+      cals.resourcesDefinition,
+      rootdir,
+    )
+  } else {
+    return getReposInOrgFromApi(github, cals.githubOrganization)
+  }
 }
 
 function getExpectedRepo(item: GetReposResponse): ExpectedRepo {
@@ -272,9 +334,13 @@ function getGitRepo(rootdir: string, relpath: string): GitRepo {
 function getDefinitionRepo(
   rootdir: string,
   reposInOrg: GetReposResponse[],
-  cals: CalsManifest,
+  isGroupedByProject: boolean,
+  resourcesDefinition: NonNullable<CalsManifest["resourcesDefinition"]>,
 ): ActualRepo | null {
-  const definitionRepoName = guessDefinitionRepoName(rootdir, cals)
+  const definitionRepoName = guessDefinitionRepoName(
+    rootdir,
+    resourcesDefinition,
+  )
   if (definitionRepoName == null) {
     return null
   }
@@ -288,9 +354,13 @@ function getDefinitionRepo(
 
   return {
     ...expectedRepo,
-    actualRelpath: getRelpath(expectedRepo),
-    git: getGitRepo(rootdir, getRelpath(expectedRepo)),
+    actualRelpath: getRelpath(isGroupedByProject, expectedRepo),
+    git: getGitRepo(rootdir, getRelpath(isGroupedByProject, expectedRepo)),
   }
+}
+
+function getIsGroupedByProject(cals: CalsManifest): boolean {
+  return cals.pathStyle !== "flat"
 }
 
 async function getExpectedRepos(
@@ -302,6 +372,8 @@ async function getExpectedRepos(
   expectedRepos: ExpectedRepo[]
   definitionRepo: ExpectedRepo | null
 }> {
+  const isGroupedByProject = getIsGroupedByProject(cals)
+
   const githubRepos = await github.getOrgRepoList({
     org: cals.githubOrganization,
   })
@@ -309,12 +381,20 @@ async function getExpectedRepos(
   // The resources-definition we will read might be out-of-sync.
   // If the file is part of a repository we will be syncing, we
   // do a pre-sync of this repo and re-read the file afterwards.
-  let reposInOrg = await getReposInOrg(cals, rootdir)
-  const definitionRepo = getDefinitionRepo(rootdir, reposInOrg, cals)
+  let reposInOrg = await getReposInOrg(github, cals, rootdir)
+  const definitionRepo =
+    cals.resourcesDefinition != null
+      ? getDefinitionRepo(
+          rootdir,
+          reposInOrg,
+          isGroupedByProject,
+          cals.resourcesDefinition,
+        )
+      : null
   if (definitionRepo !== null) {
     reporter.info("Pre-syncing resources-definition")
     await updateRepos(reporter, [definitionRepo])
-    reposInOrg = await getReposInOrg(cals, rootdir)
+    reposInOrg = await getReposInOrg(github, cals, rootdir)
   }
 
   const expectedRepos: ExpectedRepo[] = []
@@ -403,34 +483,41 @@ async function sync({
   const unknownDirs: string[] = []
   const foundRepos: ActualRepo[] = []
 
+  const isGroupedByProject = getIsGroupedByProject(cals)
+
+  function checkDir(relpath: string) {
+    const expectedRepo = expectedRepos.find(
+      (it) =>
+        getRelpath(isGroupedByProject, it) === relpath ||
+        it.aliases.some(
+          (alias) => getRelpath(isGroupedByProject, alias) === relpath,
+        ),
+    )
+    if (expectedRepo === undefined) {
+      unknownDirs.push(relpath)
+      return
+    }
+
+    foundRepos.push({
+      ...expectedRepo,
+      actualRelpath: relpath,
+      git: getGitRepo(rootdir, relpath),
+    })
+  }
+
   // Categorize all dirs.
   for (const topdir of getDirNames(rootdir)) {
     const isGitDir = fs.existsSync(path.join(rootdir, topdir, ".git"))
     if (isGitDir) {
+      checkDir(topdir)
+
       // Do not traverse deeper inside another Git repo, as that might
       // mean we do not have the proper grouped structure.
-      unknownDirs.push(topdir)
       continue
     }
 
     for (const subdir of getDirNames(path.join(rootdir, topdir))) {
-      const p = path.join(topdir, subdir)
-
-      const expectedRepo = expectedRepos.find(
-        (it) =>
-          getRelpath(it) === p ||
-          it.aliases.some((alias) => getRelpath(alias) === p),
-      )
-      if (expectedRepo === undefined) {
-        unknownDirs.push(p)
-        continue
-      }
-
-      foundRepos.push({
-        ...expectedRepo,
-        actualRelpath: p,
-        git: getGitRepo(rootdir, p),
-      })
+      checkDir(path.join(topdir, subdir))
     }
   }
 
@@ -465,12 +552,14 @@ async function sync({
 
   // Report renamed/moved repos.
   const movedRepos = foundRepos.filter(
-    (it) => getRelpath(it) !== it.actualRelpath,
+    (it) => getRelpath(isGroupedByProject, it) !== it.actualRelpath,
   )
   if (movedRepos.length > 0) {
     reporter.info("Repositories renamed:")
     for (const it of movedRepos) {
-      reporter.info(`  ${it.actualRelpath} -> ${getRelpath(it)}`)
+      reporter.info(
+        `  ${it.actualRelpath} -> ${getRelpath(isGroupedByProject, it)}`,
+      )
     }
 
     if (!askMove) {
@@ -480,7 +569,7 @@ async function sync({
       if (shouldMove) {
         for (const it of movedRepos) {
           const src = path.join(rootdir, it.actualRelpath)
-          const dest = path.join(rootdir, getRelpath(it))
+          const dest = path.join(rootdir, getRelpath(isGroupedByProject, it))
           const destParent = path.join(rootdir, it.group)
           if (fs.existsSync(dest)) {
             throw new Error(
@@ -488,7 +577,12 @@ async function sync({
             )
           }
 
-          reporter.info(`Moving ${it.actualRelpath} -> ${getRelpath(it)}`)
+          reporter.info(
+            `Moving ${it.actualRelpath} -> ${getRelpath(
+              isGroupedByProject,
+              it,
+            )}`,
+          )
 
           if (!fs.existsSync(destParent)) {
             await fs.promises.mkdir(destParent, { recursive: true })
@@ -525,7 +619,7 @@ async function sync({
       if (cloneType !== null) {
         for (const it of missingRepos) {
           reporter.info(`Cloning ${it.id}`)
-          const git = getGitRepo(rootdir, getRelpath(it))
+          const git = getGitRepo(rootdir, getRelpath(isGroupedByProject, it))
           await git.cloneGitHubRepo(it.org, it.name, cloneType)
         }
       }
