@@ -60,7 +60,7 @@
     "@types/yargs": "17.0.4",
     "@typescript-eslint/eslint-plugin": "5.2.0",
     "@typescript-eslint/parser": "5.2.0",
-    "dateformat": "4.6.3",
+    "dateformat": "5.0.2",
     "del": "6.0.0",
     "eslint": "8.1.0",
     "eslint-config-prettier": "8.3.0",
