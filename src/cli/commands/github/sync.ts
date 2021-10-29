@@ -1,5 +1,6 @@
 import findUp from "find-up"
 import fs from "fs"
+import { Repo } from "github/types"
 import yaml from "js-yaml"
 import pLimit from "p-limit"
 import path from "path"
@@ -262,12 +263,10 @@ async function getReposInOrgFromResourcesDefinition(
     )
 }
 
-async function getReposInOrgFromApi(
-  github: GitHubService,
+function getReposInOrgFromApi(
+  githubRepos: Repo[],
   orgName: string,
-): Promise<GetReposResponse[]> {
-  const result = await github.getOrgRepoList({ org: orgName })
-
+): GetReposResponse[] {
   const project: Project = {
     github: [
       {
@@ -279,7 +278,7 @@ async function getReposInOrgFromApi(
     name: "global",
   }
 
-  return result.map((repo) => ({
+  return githubRepos.map((repo) => ({
     id: getRepoId(repo.owner.login, repo.name),
     orgName,
     project,
@@ -291,7 +290,7 @@ async function getReposInOrgFromApi(
 }
 
 async function getReposInOrg(
-  github: GitHubService,
+  githubRepos: Repo[],
   cals: CalsManifest,
   rootdir: string,
 ): Promise<GetReposResponse[]> {
@@ -302,7 +301,7 @@ async function getReposInOrg(
       rootdir,
     )
   } else {
-    return getReposInOrgFromApi(github, cals.githubOrganization)
+    return getReposInOrgFromApi(githubRepos, cals.githubOrganization)
   }
 }
 
@@ -381,7 +380,7 @@ async function getExpectedRepos(
   // The resources-definition we will read might be out-of-sync.
   // If the file is part of a repository we will be syncing, we
   // do a pre-sync of this repo and re-read the file afterwards.
-  let reposInOrg = await getReposInOrg(github, cals, rootdir)
+  let reposInOrg = await getReposInOrg(githubRepos, cals, rootdir)
   const definitionRepo =
     cals.resourcesDefinition != null
       ? getDefinitionRepo(
@@ -394,7 +393,7 @@ async function getExpectedRepos(
   if (definitionRepo !== null) {
     reporter.info("Pre-syncing resources-definition")
     await updateRepos(reporter, [definitionRepo])
-    reposInOrg = await getReposInOrg(github, cals, rootdir)
+    reposInOrg = await getReposInOrg(githubRepos, cals, rootdir)
   }
 
   const expectedRepos: ExpectedRepo[] = []
