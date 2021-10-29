@@ -373,9 +373,11 @@ async function getExpectedRepos(
 }> {
   const isGroupedByProject = getIsGroupedByProject(cals)
 
+  reporter.info("Fetching org repo list")
   const githubRepos = await github.getOrgRepoList({
     org: cals.githubOrganization,
   })
+  reporter.info("Completed fetching org repo list")
 
   // The resources-definition we will read might be out-of-sync.
   // If the file is part of a repository we will be syncing, we
@@ -497,12 +499,15 @@ async function sync({
   askClone: boolean
   askMove: boolean
 }) {
+  reporter.info("Determining what repos to expect")
   const { expectedRepos, definitionRepo } = await getExpectedRepos(
     reporter,
     github,
     cals,
     rootdir,
   )
+
+  reporter.info("Classifying existing directories")
 
   const unknownDirs: string[] = []
   const foundRepos: ActualRepo[] = []
