@@ -457,6 +457,31 @@ async function askMoveConfirm(): Promise<boolean> {
   }
 }
 
+async function cloneRepos(
+  rootdir: string,
+  isGroupedByProject: boolean,
+  reporter: Reporter,
+  repos: ExpectedRepo[],
+  cloneType: CloneType,
+) {
+  const semaphore = pLimit(5)
+
+  const promises = repos.map((repo) =>
+    semaphore(async () => {
+      try {
+        reporter.info(`Cloning ${repo.id}`)
+        const git = getGitRepo(rootdir, getRelpath(isGroupedByProject, repo))
+        await git.cloneGitHubRepo(repo.org, repo.name, cloneType)
+      } catch (e) {
+        // eslint-disable-next-line @typescript-eslint/restrict-template-expressions
+        reporter.error(`Cloning failed for ${repo.id} - skipping. ${e}`)
+      }
+    }),
+  )
+
+  await Promise.all(promises)
+}
+
 async function sync({
   reporter,
   github,
@@ -616,11 +641,13 @@ async function sync({
       )
       const cloneType = await askCloneType()
       if (cloneType !== null) {
-        for (const it of missingRepos) {
-          reporter.info(`Cloning ${it.id}`)
-          const git = getGitRepo(rootdir, getRelpath(isGroupedByProject, it))
-          await git.cloneGitHubRepo(it.org, it.name, cloneType)
-        }
+        await cloneRepos(
+          rootdir,
+          isGroupedByProject,
+          reporter,
+          missingRepos,
+          cloneType,
+        )
       }
     }
   }
